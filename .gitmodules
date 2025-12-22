@@ -1,0 +1,7 @@
+[submodule "SybilInference"]
+	path = SybilInference
+	url = https://github.com/ZetrextJG/SybilInference.git
+
+[submodule "MedGS"]
+	path = MedGS
+	url = https://github.com/gmum/MedGS.git
