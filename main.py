@@ -46,11 +46,6 @@ with torch.no_grad():
 
 print(risck_score)
 
-# resultVideoMedGS = subprocess.run(
-#     ['python3', 'MedGS/video.py', '--input_folder', 'output/lungs/render', '--output_folder', 'video', '--output_name', 'lungs_medgs.mp4']
-# )
-
-# resultVideo = subprocess.run(
-#     ['python3', 'MedGS/video.py', '--input_folder', 'data/lungs/original', '--output_folder', 'video', '--output_name', 'lungs.mp4']
-# )
-#export PYTHONPATH=$PYTHONPATH:$(pwd)/SybilInference/src_sybil
+resultVideoMedGS = subprocess.run(
+    ['python3', 'MedGS/video.py', '--input_folder', 'output/lungs/render', '--output_folder', 'video', '--output_name', 'lungs_medgs.mp4']
+)
