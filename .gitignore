@@ -12,3 +12,6 @@ ENV/
 .vscode/
 .idea/
 .DS_Store
+
+data/*
+analysis/*.png

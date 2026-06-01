@@ -1,0 +1,7 @@
+
+[submodule "submodules/MedGS"]
+	path = submodules/MedGS
+	url = https://github.com/ahasdasetodu/MedGS.git
+[submodule "submodules/Sybil"]
+	path = submodules/Sybil
+	url = https://github.com/dboarjioan/SYBIL1.git

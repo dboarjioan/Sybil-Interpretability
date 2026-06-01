@@ -68,6 +68,9 @@ def parse_args(doc=None):
     p.add_argument("--max_slices", type=int, default=0,
                    help="Cap on slices fed to the classifier (0 = all). "
                         "Lower values save VRAM.")
+    p.add_argument("--sliding_window", action="store_true",
+                   help="When --max_slices is active, average gradients over "
+                        "multiple offset versions of the same slice budget.")
     p.add_argument("--n_ensemble_models", type=int, default=1,
                    help="Ensemble members used per PGD step (0 = all).")
     p.add_argument("--n_ensemble_load", type=int, default=1,

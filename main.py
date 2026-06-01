@@ -29,27 +29,26 @@ import sys
 import numpy as np
 import torch
 
-from .medgs_bootstrap import bootstrap_medgs_path
+from attack.medgs_bootstrap import bootstrap_medgs_path
 
 _MEDGS_ROOT = bootstrap_medgs_path()
 
 try:
-    from arguments import ModelParams, PipelineParams
-    from gaussian_renderer import render as gs_render
-    from scene import Scene
-    from scene.gaussian_model import GaussianModel
+    from submodules.MedGS.arguments import ModelParams, PipelineParams
+    from submodules.MedGS.gaussian_renderer import render as gs_render
+    from submodules.MedGS.scene import Scene
+    from submodules.MedGS.scene.gaussian_model import GaussianModel
 except ImportError as e:
     print(f"Failed to import MedGS (MEDGS_ROOT={_MEDGS_ROOT}): {e}")
     sys.exit(1)
 
-from .camera_loader import load_cameras_with_masks
-from .classifier_loader import load_sybil_classifier
-from .cli import parse_args
-from .mask_filtering import find_gaussians_in_masks, remove_largest_gaussians
-from .pgd_attack import run_classifier_pgd_attack
-from .ply_io import detect_sh_degree_from_ply, read_ply_attributes
-from .scene_setup import build_medgs_args, merge_cfg_args_and_defaults
-
+from attack.camera_loader import load_cameras_with_masks
+from attack.classifier_loader import load_sybil_classifier
+from attack.cli import parse_args
+from attack.mask_filtering import find_gaussians_in_masks, remove_largest_gaussians
+from attack.pgd_attack import run_classifier_pgd_attack
+from attack.ply_io import detect_sh_degree_from_ply, read_ply_attributes
+from attack.scene_setup import build_medgs_args, merge_cfg_args_and_defaults
 
 def _resolve_latest_iteration(model_path):
     pc_root = os.path.join(model_path, "point_cloud")
@@ -180,7 +179,7 @@ def main():
         target_year=args.target_year, target_value=args.target_value,
         eps=args.eps, alpha=args.alpha, steps=args.steps,
         attack_mode=args.attack_mode, clip=tuple(args.clip),
-        device=device, max_slices=50, #args.max_slices,     #need to be fixed, problems with memory, 50 works on my device
+        device=device, max_slices=args.max_slices,
         n_ensemble_models=args.n_ensemble_models,
         clf_spatial_size=tuple(args.clf_spatial_size),
         pad_depth=args.pad_depth,
