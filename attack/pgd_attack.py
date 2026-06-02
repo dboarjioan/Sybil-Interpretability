@@ -25,8 +25,11 @@ from .attribute_mapping import (
     get_gradient_slice,
     set_attribute_slice_,
 )
+from .constants import SYBIL_STD
 from .volume_rendering import (
     get_sorted_camera_indices,
+    render_one_slice,
+    preprocess_slices,
     render_volume_for_classifier,
 )
 
@@ -197,6 +200,36 @@ def run_classifier_pgd_attack(gaussians, scene, pipe, background,
         return
 
     original_values = _snapshot_originals(gaussians, attr_map, attacked_props)
+
+    # Log the clean (unperturbed) classifier probability as a baseline.
+    clf_spatial = clf_spatial_size or (128, 128)
+    ensemble_models, total_members = _select_ensemble_models(
+        classifier, n_ensemble_models)
+    scene_cameras_pre = scene.getTrainCameras()
+    cam_indices_pre = get_sorted_camera_indices(scene_cameras_pre, deduplicate_mirrors=True)
+    if max_slices > 0 and len(cam_indices_pre) > max_slices:
+        idx_np_pre = np.linspace(0, len(cam_indices_pre) - 1, max_slices).round().astype(int)
+        cam_indices_pre = [cam_indices_pre[i] for i in idx_np_pre]
+    with torch.no_grad():
+        clean_slices = [
+            render_one_slice(scene_cameras_pre[ci], gaussians, pipe, background,
+                             gs_render_fn, clf_spatial)
+            for ci in cam_indices_pre
+        ]
+        clean_vol, _ = preprocess_slices(clean_slices, pad_depth)
+        del clean_slices
+        clf_device = next(ensemble_models[0].parameters()).device
+        with torch.autocast(clf_device.type):
+            clean_logits = [m(clean_vol.to(clf_device))["logit"] for m in ensemble_models]
+        clean_logit_mean = torch.stack(clean_logits).mean(dim=0)
+        if target_year < 0 or target_year >= clean_logit_mean.shape[-1]:
+            clean_score = clean_logit_mean.mean(dim=-1).mean().item()
+        else:
+            clean_score = clean_logit_mean[:, target_year].mean().item()
+        clean_prob = float(torch.tensor(clean_score).sigmoid().item())
+        del clean_vol, clean_logits, clean_logit_mean
+    print(f"Clean logit={clean_score:.4f}  prob={clean_prob:.4f}  (before random start)")
+
     _apply_random_start(gaussians, attr_map, attacked_props,
                         subset_mask, eps, clip)
 
@@ -215,8 +248,6 @@ def run_classifier_pgd_attack(gaussians, scene, pipe, background,
         print("ERROR: no usable cameras.")
         return
 
-    ensemble_models, total_members = _select_ensemble_models(
-        classifier, n_ensemble_models)
     print(f"Ensemble used/total: {len(ensemble_models)} / {total_members}")
 
     attacked_attr_names = list({attr_map[p][0] for p in attacked_props})
@@ -231,19 +262,24 @@ def run_classifier_pgd_attack(gaussians, scene, pipe, background,
             if t.grad is not None:
                 t.grad.zero_()
 
-        volume = render_volume_for_classifier(
-            scene_cameras, cam_indices, gaussians, pipe, background,
-            gs_render_fn=gs_render_fn,
-            spatial_size=clf_spatial_size, pad_depth=pad_depth,
-        )
+        # ── Phase 1: render all slices without autograd ──────────────────
+        # Only the classifier needs the full volume; we don't want D=50
+        # rasterizer backward graphs in memory simultaneously.
+        clf_spatial = clf_spatial_size or (128, 128)
+        with torch.no_grad():
+            raw_slices = [
+                render_one_slice(scene_cameras[ci], gaussians, pipe, background,
+                                 gs_render_fn, clf_spatial)
+                for ci in cam_indices
+            ]
+            volume_nd, depth_offset = preprocess_slices(raw_slices, pad_depth)
+            del raw_slices
 
-        # If the classifier lives on a different device, the cross-device
-        # copy is recorded in autograd, so gradients still propagate.
+        # ── Phase 2: classifier forward → d(loss)/d(volume) ──────────────
         clf_device = next(ensemble_models[0].parameters()).device
-        if volume.device != clf_device:
-            volume = volume.to(clf_device)
-
-        logits = [m(volume)["logit"] for m in ensemble_models]
+        vol_leaf = volume_nd.to(clf_device).detach().requires_grad_(True)
+        with torch.autocast(clf_device.type):
+            logits = [m(vol_leaf)["logit"] for m in ensemble_models]
         logit_mean = torch.stack(logits).mean(dim=0)  # (B, 6)
 
         if target_year < 0 or target_year >= logit_mean.shape[-1]:
@@ -252,19 +288,50 @@ def run_classifier_pgd_attack(gaussians, scene, pipe, background,
             score = logit_mean[:, target_year]
 
         if attack_mode == "untargeted":
-            # Maximize the chosen logit -> minimize -logit.
             loss = -score.sum()
         else:
-            target = torch.full_like(score, float(target_value))
-            loss = F.mse_loss(score, target)
-
-        loss.backward()
+            tgt = torch.full_like(score, float(target_value))
+            loss = F.mse_loss(score, tgt)
 
         loss_val = float(loss.detach().item())
         score_val = float(score.detach().mean().item())
         prob_val = float(score.detach().mean().sigmoid().item())
 
-        del volume, logits, logit_mean, score, loss
+        loss.backward()  # populates vol_leaf.grad
+        volume_grad = vol_leaf.grad.to(gaussians._xyz.device)  # (1,3,D_vol,tH,tW)
+        del vol_leaf, logits, logit_mean, score, loss, volume_nd
+
+        # ── Phase 3: per-slice re-render with grad, accumulate ────────────
+        # gradient of loss w.r.t. raw (1,tH,tW) slice i:
+        #   = sum_c(volume_grad[0,c,di,:,:]) * (255 / SYBIL_STD)
+        # because volume = (raw*255 - mean)/std then repeat to 3 channels.
+        grad_scale = float(255.0 / SYBIL_STD)
+        D_vol = volume_grad.shape[2]
+        for i, cam_idx in enumerate(cam_indices):
+            di = depth_offset + i
+            if di < 0 or di >= D_vol:
+                continue  # cropped out by depth padding
+            # (1, tH, tW): sum channel axis since all 3 channels are identical
+            slice_vgrad = volume_grad[0, :, di, :, :].sum(0, keepdim=True).mul_(grad_scale)
+            img = render_one_slice(scene_cameras[cam_idx], gaussians, pipe,
+                                   background, gs_render_fn, clf_spatial)
+            (img * slice_vgrad).sum().backward()
+            del img, slice_vgrad
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        del volume_grad
+
+        # Gradient diagnostic: log per-attacked-attr gradient norms.
+        with torch.no_grad():
+            for prop in attacked_props:
+                attr_name, sub_idx = attr_map[prop]
+                t = getattr(gaussians, attr_name)
+                if t.grad is not None:
+                    g = get_gradient_slice(t.grad, sub_idx)[subset_mask]
+                    print(f"    grad[{prop}]  max={g.abs().max().item():.3e}  "
+                          f"mean={g.abs().mean().item():.3e}  "
+                          f"nonzero={int((g != 0).sum().item())}/{int(subset_mask.sum().item())}")
 
         # PGD step (sign of gradient) + projection back into the eps ball + clip.
         with torch.no_grad():
@@ -304,5 +371,5 @@ def run_classifier_pgd_attack(gaussians, scene, pipe, background,
     _highlight_top_perturbed(
         gaussians, attr_map, attacked_props,
         original_values, subset_mask, device,
-        top_pct=10.0, marker_value=9.0,
+        top_pct=0.0, marker_value=1.0,
     )
