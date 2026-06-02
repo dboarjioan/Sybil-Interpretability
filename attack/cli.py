@@ -46,6 +46,11 @@ def parse_args(doc=None):
                    help="L-infinity radius around the original parameter values.")
     p.add_argument("--alpha", type=float, default=None,
                    help="PGD step size. Default: eps / steps.")
+    p.add_argument("--alpha_schedule", choices=["constant", "cosine"],
+                   default="constant",
+                   help="Step-size schedule. 'cosine' decays from alpha to ~0 "
+                        "over the steps (set --alpha to pick the starting value). "
+                        "Default: constant.")
     p.add_argument("--steps", type=int, default=10,
                    help="Number of PGD iterations.")
     p.add_argument("--attack_mode",

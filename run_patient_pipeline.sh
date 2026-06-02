@@ -19,7 +19,7 @@ LUNG_MASKS_DIR="$PATIENT_DIR/lung_masks"
 ORIGINALS_DIR="$PATIENT_DIR/original"
 
 # Attack defaults (override any of these by exporting before running)
-SIGMA="${SIGMA:-0.25}"
+SIGMA="${SIGMA:-1.0}"
 
 RESULTS_DIR="$ROOT_DIR/results/${PATIENT_ID}/${SIGMA}"
 
@@ -37,11 +37,13 @@ MASK_CHECK_CSV="$ANALYSIS_DIR/mask_tumor_check.csv"
 
 REMOVE_TOP_PCT="${REMOVE_TOP_PCT:-10.0}"
 PROPS="${PROPS:-f_dc_0 f_dc_1 f_dc_2}"
-EPS="${EPS:-1.0}"
+EPS="${EPS:-0.5}"
 STEPS="${STEPS:-30}"
+ALPHA="${ALPHA:-0.5}"             # empty = eps/steps (PGD default); set to use as cosine start
 ATTACK_MODE="${ATTACK_MODE:-untargeted}"
+ALPHA_SCHEDULE="${ALPHA_SCHEDULE:-cosine}"
 TARGET_YEAR="${TARGET_YEAR:-5}"
-MAX_SLICES="${MAX_SLICES:-50}"
+MAX_SLICES="${MAX_SLICES:-0}"
 CLASSIFIER_DEVICE="${CLASSIFIER_DEVICE:-cuda}"
 CLF_SPATIAL_SIZE="${CLF_SPATIAL_SIZE:-128 128}"
 N_ENSEMBLE_LOAD="${N_ENSEMBLE_LOAD:-0}"   # each member ~130 MB; 0 = load all 5
@@ -98,6 +100,8 @@ python "$ROOT_DIR/main.py" \
   --sigma "$SIGMA" --remove_top_pct "$REMOVE_TOP_PCT" \
   --props $PROPS \
   --eps "$EPS" --steps "$STEPS" \
+  --alpha "$ALPHA" \
+  --alpha_schedule "$ALPHA_SCHEDULE" \
   --attack_mode "$ATTACK_MODE" \
   --classifier_config_dir "$CLASSIFIER_CONFIG_DIR" \
   --classifier_config_name "$CLASSIFIER_CONFIG_NAME" \
@@ -107,7 +111,6 @@ python "$ROOT_DIR/main.py" \
   --n_ensemble_load "$N_ENSEMBLE_LOAD" \
   --n_ensemble_models "$N_ENSEMBLE_MODELS" \
   --classifier_device "$CLASSIFIER_DEVICE" \
-  --sliding_window \
 
 # 2) Render attacked copy
 # Rebuild attacked model folder so render.py reads attacked PLY as point_cloud.

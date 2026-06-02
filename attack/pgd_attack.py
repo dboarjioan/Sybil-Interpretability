@@ -116,7 +116,7 @@ def _highlight_top_perturbed(gaussians, attr_map, attacked_props,
 
 def _log_step(step, steps, loss_val, score_val, prob_val,
               gaussians, attr_map, attacked_props, original_values,
-              subset_mask, attack_mode, target_value):
+              subset_mask, attack_mode, target_value, step_alpha):
     """Print one diagnostic line for a PGD iteration."""
     with torch.no_grad():
         pert_norms, max_pert = [], 0.0
@@ -132,9 +132,24 @@ def _log_step(step, steps, loss_val, score_val, prob_val,
 
     direction = "MAX" if attack_mode == "untargeted" else f"->{target_value}"
     print(f"  [PGD {step + 1:3d}/{steps}]  "
+          f"lr={step_alpha:.4e}  "
           f"loss={loss_val:.6f}  "
           f"logit={score_val:.4f} (prob={prob_val:.4f}, {direction})  "
           f"|pert|_avg={avg_pert:.6f}  |pert|_max={max_pert:.6f}")
+
+
+def _alpha_for_step(alpha_base: float, step: int, steps: int, schedule: str) -> float:
+    """Return the step-specific alpha for the given schedule.
+
+    Schedules:
+        ``"constant"`` – fixed ``alpha_base`` every step (classic PGD).
+        ``"cosine"``   – cosine decay from ``alpha_base`` to ~0;
+                          starts at the given alpha and converges finely.
+    """
+    if schedule == "cosine":
+        import math
+        return alpha_base * 0.5 * (1.0 + math.cos(math.pi * step / steps))
+    return alpha_base  # "constant"
 
 
 def run_classifier_pgd_attack(gaussians, scene, pipe, background,
@@ -144,7 +159,7 @@ def run_classifier_pgd_attack(gaussians, scene, pipe, background,
                               eps, alpha, steps, attack_mode, clip,
                               device, max_slices=0, n_ensemble_models=1,
                               clf_spatial_size=None, pad_depth=False,
-                              log_every=1):
+                              log_every=1, alpha_schedule="constant"):
     """Run PGD on selected Gaussian attributes using the classifier's logits.
 
     Gradient flow::
@@ -193,7 +208,7 @@ def run_classifier_pgd_attack(gaussians, scene, pipe, background,
     print(f"target_year:         {target_year} (0..5 = year 1..6)")
     if attack_mode == "targeted":
         print(f"target_value:        {target_value}")
-    print(f"eps={eps}, alpha={alpha}, steps={steps}, clip={clip}")
+    print(f"eps={eps}, alpha={alpha}, steps={steps}, alpha_schedule={alpha_schedule}, clip={clip}")
 
     if n_attack == 0:
         print("No Gaussians selected for attack.")
@@ -253,6 +268,7 @@ def run_classifier_pgd_attack(gaussians, scene, pipe, background,
     attacked_attr_names = list({attr_map[p][0] for p in attacked_props})
 
     for step in range(steps):
+        step_alpha = _alpha_for_step(alpha, step, steps, alpha_schedule)
         # Enable autograd only on attacked tensors.
         for attr_name in ALL_GAUSSIAN_TENSORS:
             if not hasattr(gaussians, attr_name):
@@ -265,6 +281,8 @@ def run_classifier_pgd_attack(gaussians, scene, pipe, background,
         # ── Phase 1: render all slices without autograd ──────────────────
         # Only the classifier needs the full volume; we don't want D=50
         # rasterizer backward graphs in memory simultaneously.
+        # Instead we  want to collect d(loss)/d(volume), then separately 
+        # compute d(volume)/d(Gaussian params) in Phase 3.
         clf_spatial = clf_spatial_size or (128, 128)
         with torch.no_grad():
             raw_slices = [
@@ -278,8 +296,7 @@ def run_classifier_pgd_attack(gaussians, scene, pipe, background,
         # ── Phase 2: classifier forward → d(loss)/d(volume) ──────────────
         clf_device = next(ensemble_models[0].parameters()).device
         vol_leaf = volume_nd.to(clf_device).detach().requires_grad_(True)
-        with torch.autocast(clf_device.type):
-            logits = [m(vol_leaf)["logit"] for m in ensemble_models]
+        logits = [m(vol_leaf)["logit"] for m in ensemble_models]
         logit_mean = torch.stack(logits).mean(dim=0)  # (B, 6)
 
         if target_year < 0 or target_year >= logit_mean.shape[-1]:
@@ -307,6 +324,7 @@ def run_classifier_pgd_attack(gaussians, scene, pipe, background,
         # because volume = (raw*255 - mean)/std then repeat to 3 channels.
         grad_scale = float(255.0 / SYBIL_STD)
         D_vol = volume_grad.shape[2]
+
         for i, cam_idx in enumerate(cam_indices):
             di = depth_offset + i
             if di < 0 or di >= D_vol:
@@ -349,7 +367,7 @@ def run_classifier_pgd_attack(gaussians, scene, pipe, background,
                 # Loss minimization: x <- x - alpha * sign(grad(loss)).
                 #   untargeted (loss = -score): this raises score.
                 #   targeted   (loss = MSE):    this drives score -> target.
-                new = cur - alpha * grad_slice.sign()
+                new = cur - step_alpha * grad_slice.sign()
 
                 orig = original_values[prop]
                 delta = torch.clamp(new - orig, -eps, eps)
@@ -366,10 +384,10 @@ def run_classifier_pgd_attack(gaussians, scene, pipe, background,
         if (step + 1) % max(1, log_every) == 0 or step == 0 or step == steps - 1:
             _log_step(step, steps, loss_val, score_val, prob_val,
                       gaussians, attr_map, attacked_props, original_values,
-                      subset_mask, attack_mode, target_value)
+                      subset_mask, attack_mode, target_value, step_alpha)
 
-    _highlight_top_perturbed(
-        gaussians, attr_map, attacked_props,
-        original_values, subset_mask, device,
-        top_pct=0.0, marker_value=1.0,
-    )
+    # _highlight_top_perturbed(
+    #     gaussians, attr_map, attacked_props,
+    #     original_values, subset_mask, device,
+    #     top_pct=0.0, marker_value=1.0,
+    # )

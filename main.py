@@ -183,6 +183,7 @@ def main():
         n_ensemble_models=args.n_ensemble_models,
         clf_spatial_size=tuple(args.clf_spatial_size),
         pad_depth=args.pad_depth,
+        alpha_schedule=args.alpha_schedule,
     )
 
     # --- Step 6: save attacked PLY ----------------------------------------
