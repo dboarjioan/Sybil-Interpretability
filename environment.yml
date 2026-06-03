@@ -10,10 +10,7 @@ dependencies:
   - matplotlib
   - scikit-image
   - pillow
-  - opencv
- 
-  - cuda-toolkit=13.0
-  
+  - opencv  
   - pip
   - pip:
       - requests

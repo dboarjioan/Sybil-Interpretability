@@ -26,6 +26,8 @@ This script:
 
 ### Sybil checkpoints
 
+TODO: where to get them from? or add dvc
+
 The Sybil config expects checkpoints under:
 
 ```text
