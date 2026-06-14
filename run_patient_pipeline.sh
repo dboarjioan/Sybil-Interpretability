@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 1 ]]; then
-  echo "Usage: $0 <patient_id>"
-  echo "Example: $0 1"
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  echo "Usage: $0 <patient_id> [sigma]"
+  echo "Example: $0 1 0.5"
   exit 1
 fi
 
 PATIENT_ID="$1"
+[[ $# -ge 2 ]] && SIGMA="$2"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Paths
@@ -17,30 +18,37 @@ MASKS_DIR="$PATIENT_DIR/masks"
 LUNG_MASKS_DIR="$PATIENT_DIR/lung_masks"
 ORIGINALS_DIR="$PATIENT_DIR/original"
 
-ATTACKED_PLY="$MODEL_PATH/attacked_clf.ply"
-ATTACKED_MODEL_PATH="$PATIENT_DIR/${PATIENT_ID}_attacked_clf"
+# Attack defaults (override any of these by exporting before running)
+SIGMA="${SIGMA:-1.0}"
+
+RESULTS_DIR="$ROOT_DIR/results/${PATIENT_ID}/${SIGMA}"
+
+ATTACKED_PLY="$RESULTS_DIR/attacked_clf.ply"
+ATTACKED_MODEL_PATH="$RESULTS_DIR/${PATIENT_ID}_attacked_clf"
 ATTACKED_RENDER_DIR="$ATTACKED_MODEL_PATH/render_img"
 CLEAN_RENDER_DIR="$MODEL_PATH/render_img"
 
-ANALYSIS_DIR="$ROOT_DIR/analysis/run${PATIENT_ID}"
+ANALYSIS_DIR="$RESULTS_DIR/analysis"
 DIFF_DIR="$ANALYSIS_DIR/diffs"
 COMP_DIR="$ANALYSIS_DIR/components"
 ANNOTATED_DIR="$ANALYSIS_DIR/annotated"
 MASK_CHECK_CSV="$ANALYSIS_DIR/mask_tumor_check.csv"
 
-# Attack defaults (override any of these by exporting them before running)
-SIGMA="${SIGMA:-0.5}"
+
 REMOVE_TOP_PCT="${REMOVE_TOP_PCT:-10.0}"
 PROPS="${PROPS:-f_dc_0 f_dc_1 f_dc_2}"
 EPS="${EPS:-0.5}"
-STEPS="${STEPS:-10}"
+STEPS="${STEPS:-30}"
+ALPHA="${ALPHA:-0.5}"             # empty = eps/steps (PGD default); set to use as cosine start
 ATTACK_MODE="${ATTACK_MODE:-untargeted}"
+ALPHA_SCHEDULE="${ALPHA_SCHEDULE:-cosine}"
 TARGET_YEAR="${TARGET_YEAR:-5}"
-MAX_SLICES="${MAX_SLICES:-50}"
+MAX_SLICES="${MAX_SLICES:-0}"
 CLASSIFIER_DEVICE="${CLASSIFIER_DEVICE:-cuda}"
 CLF_SPATIAL_SIZE="${CLF_SPATIAL_SIZE:-128 128}"
-N_ENSEMBLE_LOAD="${N_ENSEMBLE_LOAD:-0}"
-N_ENSEMBLE_MODELS="${N_ENSEMBLE_MODELS:-0}"
+N_ENSEMBLE_LOAD="${N_ENSEMBLE_LOAD:-0}"   # each member ~130 MB; 0 = load all 5
+N_ENSEMBLE_MODELS="${N_ENSEMBLE_MODELS:-0}" # members used per PGD step; 0 = all loaded
+
 
 # Analysis defaults
 MIN_AREA="${MIN_AREA:-20}"
@@ -71,9 +79,12 @@ fi
 
 echo "============================================================"
 echo "Pipeline start for patient: $PATIENT_ID"
-echo "Model path:  $MODEL_PATH"
-echo "Iteration:   $LATEST_ITER"
-echo "Output root: $ANALYSIS_DIR"
+echo "Model path:   $MODEL_PATH"
+echo "Iteration:    $LATEST_ITER"
+echo "Output root:  $ANALYSIS_DIR"
+echo "--- VRAM knobs (override by exporting before running) ---"
+echo "  MAX_SLICES=$MAX_SLICES  CLF_SPATIAL_SIZE=$CLF_SPATIAL_SIZE"
+echo "  N_ENSEMBLE_LOAD=$N_ENSEMBLE_LOAD  N_ENSEMBLE_MODELS=$N_ENSEMBLE_MODELS"
 echo "============================================================"
 
 mkdir -p "$ANALYSIS_DIR"
@@ -89,6 +100,8 @@ python "$ROOT_DIR/main.py" \
   --sigma "$SIGMA" --remove_top_pct "$REMOVE_TOP_PCT" \
   --props $PROPS \
   --eps "$EPS" --steps "$STEPS" \
+  --alpha "$ALPHA" \
+  --alpha_schedule "$ALPHA_SCHEDULE" \
   --attack_mode "$ATTACK_MODE" \
   --classifier_config_dir "$CLASSIFIER_CONFIG_DIR" \
   --classifier_config_name "$CLASSIFIER_CONFIG_NAME" \

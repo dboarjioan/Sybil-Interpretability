@@ -75,6 +75,56 @@ def croppad_depth_axis(volume, target_depth):
     return volume[:, :, cl:cl + target_depth, :, :]
 
 
+def render_one_slice(cam, gaussians, pipe, background, gs_render_fn, spatial_size):
+    """Render a single camera view and resize to ``spatial_size``.
+
+    Returns:
+        ``(1, tH, tW)`` tensor, within the current grad context.
+    """
+    tH, tW = spatial_size
+    out = gs_render_fn(cam, gaussians, pipe, background)
+    img_raw = out["render"]
+    # Straight-through estimator: forward identical to clamp(0,1), but
+    # gradient passes through saturation boundaries without zeroing.
+    img = img_raw + (img_raw.clamp(0.0, 1.0) - img_raw).detach()
+    if img.shape[0] > 1:
+        img = img.mean(dim=0, keepdim=True)
+    H, W = img.shape[-2], img.shape[-1]
+    if (H, W) != (tH, tW):
+        img = F.interpolate(
+            img.unsqueeze(0), size=(tH, tW),
+            mode="bilinear", align_corners=False,
+        ).squeeze(0)
+    return img
+
+
+def preprocess_slices(slice_tensors, pad_depth):
+    """Stack, normalize, and optionally pad/crop a list of ``(1, tH, tW)`` tensors.
+
+    Returns:
+        volume:       ``(1, 3, D_out, tH, tW)`` tensor.
+        depth_offset: int such that loop index ``i`` maps to volume depth
+                      ``depth_offset + i``.  May be negative (crop case).
+    """
+    volume = torch.stack(slice_tensors, dim=1).unsqueeze(0)  # (1, 1, D, tH, tW)
+    D = volume.shape[2]
+    depth_offset = 0
+
+    if pad_depth:
+        if D < SYBIL_TARGET_DEPTH:
+            depth_offset = (SYBIL_TARGET_DEPTH - D) // 2
+        elif D > SYBIL_TARGET_DEPTH:
+            depth_offset = -((D - SYBIL_TARGET_DEPTH) // 2)
+        volume = croppad_depth_axis(volume, SYBIL_TARGET_DEPTH)
+
+    volume = volume * 255.0
+    volume = (volume - SYBIL_MEAN) / SYBIL_STD
+    if volume.shape[1] == 1:
+        volume = volume.repeat(1, 3, 1, 1, 1)
+
+    return volume, depth_offset
+
+
 def render_volume_for_classifier(scene_cameras, cam_indices, gaussians,
                                  pipe, background, gs_render_fn,
                                  spatial_size=None, pad_depth=True):
@@ -102,31 +152,10 @@ def render_volume_for_classifier(scene_cameras, cam_indices, gaussians,
     if spatial_size is None:
         spatial_size = SYBIL_TARGET_SPATIAL
 
-    slices = []
-    for cam_idx in cam_indices:
-        cam = scene_cameras[cam_idx]
-        out = gs_render_fn(cam, gaussians, pipe, background)
-        img = torch.clamp(out["render"], 0.0, 1.0)
-        if img.shape[0] > 1:
-            img = img.mean(dim=0, keepdim=True)
-        slices.append(img)
-
-    volume = torch.stack(slices, dim=1).unsqueeze(0)  # (1, 1, D, H, W)
-
-    _, _, D, H, W = volume.shape
-    tH, tW = spatial_size
-    if (H, W) != (tH, tW):
-        volume = F.interpolate(volume, size=(D, tH, tW),
-                               mode="trilinear", align_corners=False)
-
-    if pad_depth:
-        volume = croppad_depth_axis(volume, SYBIL_TARGET_DEPTH)
-
-    # Match Sybil normalization (skip uint8 quantization - it would zero the gradient).
-    volume = volume * 255.0
-    volume = (volume - SYBIL_MEAN) / SYBIL_STD
-
-    if volume.shape[1] == 1:
-        volume = volume.repeat(1, 3, 1, 1, 1)
-
+    slices = [
+        render_one_slice(scene_cameras[ci], gaussians, pipe, background,
+                         gs_render_fn, spatial_size)
+        for ci in cam_indices
+    ]
+    volume, _ = preprocess_slices(slices, pad_depth)
     return volume
